@@ -19,3 +19,16 @@ struct NoteDTO: Identifiable, Codable {
 protocol NotesAPI {
     func fetchNotes(count: Int) async throws -> [NoteDTO]
 }
+
+
+
+// Abstraction for the repository
+protocol NotesRepositoryProtocol: AnyObject {
+    func sync(count: Int) async throws
+    func fetchAll() throws -> [NoteDTO]
+    func fetch(byID id: String) throws -> NoteDTO?
+    
+    func create(title: String, content: String) throws
+    func update(id: String, title: String, content: String) throws
+    func delete(ids: [String]) throws
+}

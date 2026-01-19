@@ -10,12 +10,21 @@ import CoreData
 
 @main
 struct CoreDataBatchFetchApp: App {
-    let persistenceController = PersistenceController.shared
+    private let container: NSPersistentContainer = {
+        let container = NSPersistentContainer(name: "CoreDataBatchFetch")
+        container.loadPersistentStores { _, error in
+            if let error = error { fatalError("Unresolved error: \(error)") }
+        }
+        return container
+    }()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+            let api: NotesAPI = MockNotesAPI()
+            let repository: NotesRepositoryProtocol = NotesRepository(api: api, container: container)
+            let viewModel = NotesViewModel(repository: repository)
+            ContentView(viewModel: viewModel)
         }
     }
 }
+

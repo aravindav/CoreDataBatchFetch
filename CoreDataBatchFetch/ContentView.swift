@@ -10,7 +10,6 @@ import SwiftUI
 import CoreData
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
 
     // Sorting state toggled by toolbar button
     @State private var sortAscending = false
@@ -18,7 +17,7 @@ struct ContentView: View {
     @State private var newTitle = ""
     @State private var newContent = ""
 
-    @State private var noteToEdit: Note?
+    @State private var noteToEdit: NoteDTO?
     @State private var editTitle = ""
     @State private var editContent = ""
     @State private var searchText = ""
@@ -27,20 +26,47 @@ struct ContentView: View {
     
     @State private var limit: Int = 50
     @State private var isLoadingMore = false
-    
-    private let repo = NotesRepository(
-        api: MockNotesAPI(),
-        container: PersistenceController.shared.container
-    )
 
+    @StateObject var viewModel: NotesViewModel
+    
+    private var filteredNotes: [NoteDTO] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return viewModel.notes }
+        return viewModel.notes.filter { note in
+            note.title.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil ||
+            note.content.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+
+    private var sortedNotes: [NoteDTO] {
+        filteredNotes.sorted { lhs, rhs in
+            sortAscending
+            ? lhs.createdAt < rhs.createdAt
+            : lhs.createdAt > rhs.createdAt
+        }
+    }
+
+    private var visibleNotes: [NoteDTO] {
+        Array(sortedNotes.prefix(limit))
+    }
+    
     
     var body: some View {
         NavigationStack {
             VStack {
-                // List driven by a child view whose FetchRequest depends on sortAscending
-                NotesList(searchText: searchText, sortAscending: sortAscending, paginationLimit: limit, onEdit: startEditingNote, onDelete: deleteNotes){
-                    loadMore()
-                }
+
+                NotesList(
+                    visibleNotes: visibleNotes,
+                    onReachEnd: { loadMore() },
+                    onEdit: { dto in
+                        noteToEdit = dto
+                        editTitle = dto.title
+                        editContent = dto.content
+                    },
+                    onDelete: { offsets in
+                        viewModel.deleteNotes(ids: offsets.map { visibleNotes[$0].id })
+                    }
+                )
 
                 VStack {
                     TextField("Title", text: $newTitle)
@@ -48,7 +74,9 @@ struct ContentView: View {
                     TextField("Content", text: $newContent)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
 
-                    Button(action: addNote) {
+                    Button {
+                        viewModel.addNote(title: newTitle, content: newContent)
+                    } label: {
                         Text("Add Note")
                             .frame(maxWidth: .infinity)
                             .padding()
@@ -57,6 +85,8 @@ struct ContentView: View {
                             .cornerRadius(8)
                     }
                     .padding(.top, 5)
+
+                
                 }
                 .padding()
             }
@@ -74,13 +104,13 @@ struct ContentView: View {
                 
                 ToolbarItem(placement: .navigationBarTrailing) {
                                  Button("Sync 10k") {
-                                     Task {
-                                         do { try await repo.sync(count: 500) }
-                                         catch { print("Sync failed:", error) }
-                                     }
+                                     viewModel.sync(count: 500)
                                  }
                              }
             }
+        }
+        .task {
+            viewModel.load()
         }
         .sheet(item: $noteToEdit) { note in
             VStack {
@@ -106,7 +136,7 @@ struct ContentView: View {
                     Spacer()
 
                     Button("Save") {
-                        saveEdit(note)
+                        viewModel.saveEdit(id: note.id, title: editTitle, content: editContent)
                         noteToEdit = nil
                     }
                     .padding()
@@ -128,155 +158,43 @@ struct ContentView: View {
             isLoadingMore = false
         }
     }
-
-    // MARK: - CRUD
-
-    private func addNote() {
-        let newNote = Note(context: viewContext)
-        newNote.title = newTitle
-        newNote.content = newContent
-        newNote.createdAt = Date()
-
-        do {
-            try viewContext.save()
-            newTitle = ""
-            newContent = ""
-        } catch {
-            print("Error occured: \(error)")
-        }
-    }
-
-    private func saveEdit(_ note: Note) {
-        note.title = editTitle
-        note.content = editContent
-
-        do {
-            try viewContext.save()
-        } catch {
-            print("Error saving the edit : \(error)")
-        }
-    }
-
-    private func deleteNotes(_ notes: FetchedResults<Note>, offsets: IndexSet) {
-        withAnimation {
-            offsets.forEach { index in
-                viewContext.delete(notes[index])
-            }
-
-            do {
-                try viewContext.save()
-            } catch {
-                print("Failed to delete note: \(error)")
-            }
-        }
-    }
-
-    private func startEditingNote(_ note: Note) {
-        noteToEdit = note
-        editTitle = note.title ?? ""
-        editContent = note.content ?? ""
-    }
-
-    // Child view that owns the FetchRequest and re-initializes when sortAscending changes
+    
     private struct NotesList: View {
-       
-        @Environment(\.managedObjectContext) private var viewContext
-        @FetchRequest private var notes: FetchedResults<Note>
-        private let onReachEnd: () -> Void
-
-        var onEdit: ((Note) -> Void)?
-        var onDelete: ((FetchedResults<Note>, IndexSet) -> Void)?
-
-        let paginationLimit: Int
-
-        init(searchText: String , sortAscending: Bool, paginationLimit : Int,
-             onEdit: ((Note) -> Void)? = nil,
-             onDelete: ((FetchedResults<Note>, IndexSet) -> Void)? = nil,
-             onReachEnd: @escaping () -> Void) {
-            
-            let predicate : NSPredicate?
-            if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                predicate = nil
-            }
-            else{
-                predicate = NSPredicate(format: "title CONTAINS[cd] %@ OR content CONTAINS[cd] %@", searchText,searchText)
-            }
-            self.paginationLimit = paginationLimit
-            self.onReachEnd = onReachEnd
-
-            let request: NSFetchRequest<Note> = Note.fetchRequest()
-            request.sortDescriptors = [
-                NSSortDescriptor(keyPath: \Note.createdAt, ascending: sortAscending)
-            ]
-            request.predicate = predicate
-            request.fetchBatchSize = 50
-            request.returnsObjectsAsFaults = true
-
-            // Pagination window
-            request.fetchLimit = paginationLimit
-            
-            _notes = FetchRequest(fetchRequest: request, animation: .default)
-
-            
-//            _notes = FetchRequest<Note>(
-//                sortDescriptors: [NSSortDescriptor(keyPath: \Note.createdAt, ascending: sortAscending)],
-//                predicate: predicate,
-//                animation: .default
-//            )
-//            
-            self.onEdit = onEdit
-            self.onDelete = onDelete
-        }
+        let visibleNotes: [NoteDTO]
+        let onReachEnd: () -> Void
+        let onEdit: (NoteDTO) -> Void
+        let onDelete: (IndexSet) -> Void
 
         var body: some View {
             List {
-                ForEach(Array(notes.enumerated()), id: \.element.objectID) { index, note in
+                ForEach(Array(visibleNotes.enumerated()), id: \.element.id) { index, note in
                     HStack {
                         VStack(alignment: .leading) {
-                            Text(note.title ?? "Untitled")
-                                .font(.headline)
-                            Text(note.content ?? "")
-                                .font(.subheadline)
-                                .foregroundStyle(.gray)
-                            Text(note.createdAt ?? Date(), style: .date)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text(note.title).font(.headline)
+                            Text(note.content).font(.subheadline).foregroundStyle(.gray)
+                            Text(note.createdAt, style: .date)
+                                .font(.caption).foregroundStyle(.secondary)
                         }
-
                         Spacer()
-
-                        Button(action: { onEdit?(note) }) {
-                            Image(systemName: "pencil")
-                                .foregroundStyle(.blue)
+                        Button { onEdit(note) } label: {
+                            Image(systemName: "pencil").foregroundStyle(.blue)
                         }
                         .buttonStyle(.borderless)
                     }
                     .padding(.vertical, 4)
                     .onAppear {
-                        if index == notes.count - 1 {
+                        if index == visibleNotes.count - 1 {
                             onReachEnd()
                         }
                     }
                 }
-                .onDelete { offsets in
-                    if let onDelete {
-                        onDelete(notes, offsets)
-                    } else {
-                        // default delete if no handler provided
-                        withAnimation {
-                            offsets.forEach { index in
-                                viewContext.delete(notes[index])
-                            }
-                            try? viewContext.save()
-                        }
-                    }
-                }
+                .onDelete(perform: onDelete)
             }
         }
     }
 }
 
-#Preview {
-    ContentView()
-}
+
+
+
 

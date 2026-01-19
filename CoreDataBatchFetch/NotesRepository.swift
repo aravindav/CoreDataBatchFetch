@@ -45,4 +45,68 @@ final class NotesRepository {
             }
         }
     }
+    
+  
+}
+
+extension NotesRepository: NotesRepositoryProtocol {
+    func create(title: String, content: String) throws {
+          let context = container.viewContext
+          let note = Note(context: context)
+          note.remoteID = UUID().uuidString // or another ID scheme
+          note.title = title
+          note.content = content
+          note.createdAt = Date()
+          try context.save()
+      }
+    
+    
+    func update(id: String, title: String, content: String) throws {
+          let context = container.viewContext
+          let req: NSFetchRequest<Note> = Note.fetchRequest()
+          req.fetchLimit = 1
+          req.predicate = NSPredicate(format: "remoteID == %@", id)
+          guard let note = try context.fetch(req).first else { return }
+          note.title = title
+          note.content = content
+          try context.save()
+      }
+  
+    
+    func delete(ids: [String]) throws {
+          let context = container.viewContext
+          let req: NSFetchRequest<Note> = Note.fetchRequest()
+          req.predicate = NSPredicate(format: "remoteID IN %@", ids)
+          let results = try context.fetch(req)
+          results.forEach { context.delete($0) }
+          try context.save()
+      }
+    
+    func fetchAll() throws -> [NoteDTO] {
+        let context = container.viewContext
+        let request: NSFetchRequest<Note> = Note.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \Note.createdAt, ascending: false)]
+        let notes = try context.fetch(request)
+        return notes.compactMap { note in
+            guard let id = note.remoteID,
+                  let title = note.title,
+                  let content = note.content,
+                  let createdAt = note.createdAt else { return nil }
+            return NoteDTO(id: id, title: title, content: content, createdAt: createdAt)
+        }
+    }
+
+    func fetch(byID id: String) throws -> NoteDTO? {
+        let context = container.viewContext
+        let request: NSFetchRequest<Note> = Note.fetchRequest()
+        request.fetchLimit = 1
+        request.predicate = NSPredicate(format: "remoteID == %@", id)
+        guard let note = try context.fetch(request).first,
+              let title = note.title,
+              let content = note.content,
+              let createdAt = note.createdAt else {
+            return nil
+        }
+        return NoteDTO(id: id, title: title, content: content, createdAt: createdAt)
+    }
 }
